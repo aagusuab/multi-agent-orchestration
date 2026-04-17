@@ -1,0 +1,88 @@
+"""CLI entry point for the multi-agent system."""
+
+import argparse
+import sys
+
+import anyio
+
+from .agents import run_agent
+from .config import AgentConfig
+from .orchestrator import run_orchestrator
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Multi-agent system for software engineering workflows",
+    )
+    parser.add_argument(
+        "command",
+        choices=["pm", "feature", "review", "docs", "bugfix", "pr-review"],
+        help="Which agent to run (pm = Project Manager orchestrator)",
+    )
+    parser.add_argument(
+        "task",
+        help="Task description or instruction for the agent",
+    )
+    parser.add_argument(
+        "--project-dir", "-d",
+        default=".",
+        help="Path to the project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--repo", "-r",
+        default="",
+        help="GitHub repository in owner/repo format",
+    )
+    parser.add_argument(
+        "--model", "-m",
+        default="claude-opus-4-6",
+        help="Model to use (default: claude-opus-4-6)",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=200,
+        help="Max agent turns (default: 200)",
+    )
+    parser.add_argument(
+        "--max-budget",
+        type=float,
+        default=5.0,
+        help="Max budget in USD per agent run (default: 5.0)",
+    )
+    return parser.parse_args()
+
+
+COMMAND_TO_AGENT = {
+    "feature": "feature-builder",
+    "review": "code-reviewer",
+    "docs": "documentation",
+    "bugfix": "bug-fixer",
+    "pr-review": "pr-reviewer",
+}
+
+
+async def async_main():
+    args = parse_args()
+
+    config = AgentConfig(
+        project_dir=args.project_dir,
+        github_repo=args.repo,
+        model=args.model,
+        max_turns=args.max_turns,
+        max_budget_usd=args.max_budget,
+    )
+
+    if args.command == "pm":
+        await run_orchestrator(args.task, config)
+    else:
+        agent_name = COMMAND_TO_AGENT[args.command]
+        await run_agent(agent_name, args.task, config)
+
+
+def run():
+    anyio.run(async_main)
+
+
+if __name__ == "__main__":
+    run()

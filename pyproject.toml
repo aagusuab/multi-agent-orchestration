@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-agents"
+version = "0.1.0"
+description = "Multi-agent system for software engineering workflows"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk",
+    "anyio",
+]
+
+[project.scripts]
+claude-agents = "claude_agents.main:run"
