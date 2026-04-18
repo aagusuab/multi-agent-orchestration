@@ -63,6 +63,8 @@ The loop terminates early on PASS or when `--max-fix-iters` is exhausted. Plan/P
 ### Plan mode (planner stage only)
 Runs just the planner and writes the result to `PLAN.md` in the project directory. Lets you review/edit the plan before committing to implementation. Feed the approved plan back into team mode with `--plan-file`.
 
+Add `--interactive` to converse with the planner turn-by-turn instead of one-shot. The planner reads your repo, asks clarifying questions, and iterates on the idea. Type `/save` to finalize the plan to `PLAN.md`; `/quit` aborts without saving. Tool calls (`Read`, `Glob`, `Grep`) are streamed inline so long exploration phases aren't silent.
+
 ### Build mode (multi-feature outer loop)
 Takes a product vision, generates an ordered backlog of tasks (`BACKLOG.md` in the project dir), then runs the full team pipeline once per task:
 
@@ -75,18 +77,47 @@ vision -> backlog planner -> BACKLOG.md
 
 The backlog is persisted, so runs are **resumable** — re-running `build` against an existing `BACKLOG.md` continues from the next unchecked task. You can also hand-edit the backlog between runs. Failed tasks are marked `- [!]` and skipped; the loop does not abort on failure.
 
+### Automatic PR creation (`--create-pr`)
+
+Available in `team` and `build` modes. After a passing verification, the system:
+
+1. Creates a branch `agent/<slugified-task>` (only if currently on `main`/`master`; otherwise reuses the current branch).
+2. Commits all changes using a commit message authored by the exec/fix agent (the agent ends its report with a `## Suggested commit message` fenced block; the orchestrator parses and uses it verbatim).
+3. Pushes the branch with `git push -u origin`.
+4. Opens a PR with `gh pr create` — PR title is the commit subject, PR body is the commit body plus the original PRD.
+
+Each step is fail-soft: if `gh` is missing, commit+push still happen and you open the PR manually; if push fails, the commit is preserved locally.
+
 ## Prerequisites
 
 - Python 3.10+
-- [Claude Agent SDK](https://pypi.org/project/claude-agent-sdk/) (`pip install claude-agent-sdk`)
-- [GitHub CLI](https://cli.github.com/) (`gh`) authenticated for GitHub features
+- [Claude Code CLI](https://www.npmjs.com/package/@anthropic-ai/claude-code) — the Agent SDK runs on top of it (`npm install -g @anthropic-ai/claude-code`)
+- Authentication (pick one):
+  - `ANTHROPIC_API_KEY` environment variable, OR
+  - Log in with a Claude subscription: run `claude`, then `/login` and choose "Log in with Claude account"
+- [GitHub CLI](https://cli.github.com/) (`gh`) authenticated — required only for `bug-fixer`, `pr-reviewer`, and the `--create-pr` flag
 
 ## Installation
+
+On Debian/Ubuntu systems the system Python blocks global installs (PEP 668), so use a virtual environment:
 
 ```bash
 git clone git@github.com:aagusuab/multi-agent-orchestration.git
 cd multi-agent-orchestration
+
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
+
+# Verify
+which claude-agents
+claude-agents --help
+```
+
+Activate the venv in each new shell (`source .venv/bin/activate`) or alias the binary:
+
+```bash
+alias claude-agents='/path/to/multi-agent-orchestration/.venv/bin/claude-agents'
 ```
 
 ## Usage
@@ -125,6 +156,35 @@ claude-agents team --plan-file PLAN.md \
 
 When `--plan-file` is used, the `task` argument is optional — the plan's `## Goal` section carries the intent.
 
+### Plan interactively (conversational planner)
+
+Talk with the planner turn-by-turn. The agent reads the repo, asks clarifying questions, and only emits the final plan on `/save`:
+
+```bash
+claude-agents plan --interactive "Winesource needs wine data from free sources" \
+  --project-dir /path/to/your/project
+```
+
+Start blank if you'd rather the agent ask what you want to build:
+
+```bash
+claude-agents plan --interactive --project-dir /path/to/your/project
+```
+
+Commands inside the session: `/save` (finalize to `PLAN.md` and exit), `/quit` (abort).
+
+### Team with automatic PR
+
+Run the full pipeline and open a PR on pass — commit message is authored by the exec/fix agent:
+
+```bash
+claude-agents team "Add rate limiter middleware to the API" \
+  --project-dir /path/to/your/project \
+  --create-pr
+```
+
+Requires `gh` authenticated. On pass: branch → commit (agent-authored message) → push → PR. On fail: nothing is committed.
+
 ### Build (multi-feature outer loop)
 
 Describe a product vision and let the system decompose it into a backlog and execute each task through the full team pipeline:
@@ -137,6 +197,8 @@ claude-agents build "A CLI todo app with SQLite storage, add/list/complete comma
 ```
 
 `BACKLOG.md` is written to the project directory. Re-run the same command to resume from the next `- [ ]` task. Edit the backlog file between runs to adjust priorities or add tasks.
+
+Add `--create-pr` to open a PR for each task that passes verification — one branch and one PR per backlog item.
 
 ### Individual Agents
 
@@ -171,6 +233,24 @@ claude-agents pr-review "Review PR #15" -d /path/to/project -r owner/repo
 | `--max-fix-iters` | Max verify/fix iterations (team/build modes) | `3` |
 | `--max-tasks` | Max backlog tasks to execute (build mode only) | `20` |
 | `--plan-file` | Path to a pre-approved plan file (team mode) | |
+| `--interactive`, `-i` | Conversational planner (plan mode only) | off |
+| `--create-pr` | On pass, branch + commit + push + PR (team/build modes; requires `gh`) | off |
+
+### Command summary
+
+| Command | Purpose |
+|---|---|
+| `pm "<task>"` | PM orchestrator decides which agents to invoke |
+| `team "<task>"` | Staged pipeline for one task |
+| `team --plan-file PLAN.md` | Staged pipeline using a pre-approved plan (task optional) |
+| `plan "<task>"` | One-shot planner, writes `PLAN.md` |
+| `plan --interactive "<task>"` | Conversational planner, writes `PLAN.md` on `/save` |
+| `build "<vision>"` | Backlog-driven multi-task build |
+| `feature "<task>"` | Individual feature-builder agent |
+| `review "<task>"` | Individual code-reviewer agent |
+| `bugfix "<task>"` | Individual bug-fixer agent (needs `--repo`) |
+| `docs "<task>"` | Individual documentation agent |
+| `pr-review "<task>"` | Individual pr-reviewer agent (needs `--repo`) |
 
 ## Project Structure
 
@@ -181,8 +261,9 @@ claude_agents/
   tools.py               # Custom MCP tools for GitHub integration
   agents.py              # Agent definitions and standalone runner
   orchestrator.py        # PM agent that coordinates subagents (freeform mode)
-  team_orchestrator.py   # Staged pipeline with verify/fix loop (team mode, plan mode)
+  team_orchestrator.py   # Staged pipeline with verify/fix loop (team + plan modes)
   build_orchestrator.py  # Multi-feature outer loop over a persisted backlog (build mode)
+  pr_creator.py          # Branch + commit + push + PR for passing runs (--create-pr)
   main.py                # CLI entry point
 ```
 
