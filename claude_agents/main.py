@@ -10,7 +10,7 @@ from .agents import run_agent
 from .build_orchestrator import run_build
 from .config import AgentConfig
 from .orchestrator import run_orchestrator
-from .team_orchestrator import run_plan, run_team
+from .team_orchestrator import run_plan, run_plan_interactive, run_team
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Path to a pre-approved plan file. In team mode, skips the PLAN stage and uses this file instead.",
     )
+    parser.add_argument(
+        "--interactive", "-i",
+        action="store_true",
+        help="For `plan`: converse with the planner turn-by-turn instead of one-shot. Use /save to write PLAN.md.",
+    )
     return parser.parse_args()
 
 
@@ -88,9 +93,14 @@ COMMAND_TO_AGENT = {
 async def async_main():
     args = parse_args()
 
-    if not args.task and not (args.command == "team" and args.plan_file):
+    task_optional = (
+        (args.command == "team" and args.plan_file)
+        or (args.command == "plan" and args.interactive)
+    )
+    if not args.task and not task_optional:
         sys.exit(
-            "Error: `task` is required except for `team` with --plan-file."
+            "Error: `task` is required except for `team --plan-file` or "
+            "`plan --interactive`."
         )
 
     config = AgentConfig(
@@ -104,12 +114,18 @@ async def async_main():
     if args.command == "pm":
         await run_orchestrator(args.task, config)
     elif args.command == "plan":
-        plan_text = await run_plan(args.task, config)
+        if args.interactive:
+            plan_text = await run_plan_interactive(args.task, config)
+            if not plan_text:
+                return
+        else:
+            plan_text = await run_plan(args.task, config)
         plan_path = Path(config.project_dir) / "PLAN.md"
         plan_path.write_text(plan_text)
         print(f"\n\n[plan] Plan written to {plan_path}")
+        follow_up_task = f"\"{args.task}\" " if args.task else ""
         print("[plan] Review/edit, then run: "
-              f"claude-agents team \"{args.task}\" -d {config.project_dir} "
+              f"claude-agents team {follow_up_task}-d {config.project_dir} "
               f"--plan-file {plan_path}")
     elif args.command == "team":
         plan_text: str | None = None

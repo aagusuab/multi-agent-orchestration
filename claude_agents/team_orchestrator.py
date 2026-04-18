@@ -7,17 +7,22 @@ runs until the verifier emits `VERIFICATION: PASS` or the iteration cap hits.
 
 from dataclasses import dataclass, field
 
+import anyio
+
 from claude_agent_sdk import (
     query,
     ClaudeAgentOptions,
+    ClaudeSDKClient,
     ResultMessage,
     AssistantMessage,
     TextBlock,
+    ToolUseBlock,
 )
 
 from .config import AgentConfig
 from .prompts import (
     PLANNER_PROMPT,
+    INTERACTIVE_PLANNER_PROMPT,
     PRD_PROMPT,
     EXEC_LEAD_PROMPT,
     VERIFIER_PROMPT,
@@ -99,6 +104,80 @@ async def run_plan(task: str, config: AgentConfig) -> str:
         github_server,
         model=config.light_model,
     )
+
+
+async def _stream_turn(client: ClaudeSDKClient) -> str:
+    """Consume one response turn, printing text and tool activity. Returns final text."""
+    buffered = ""
+    async for message in client.receive_response():
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    print(block.text, end="", flush=True)
+                    buffered += block.text
+                elif isinstance(block, ToolUseBlock):
+                    args_preview = ""
+                    if isinstance(block.input, dict):
+                        for key in ("file_path", "pattern", "command", "path"):
+                            if key in block.input:
+                                args_preview = f" {block.input[key]}"
+                                break
+                    print(f"\n[→ {block.name}{args_preview}]", flush=True)
+    return buffered
+
+
+async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
+    """Interactive planning session. Returns the final plan markdown.
+
+    The user converses with the planner until typing `/save`, at which point
+    the agent is asked to emit the final structured plan. `/quit` aborts
+    without saving.
+    """
+    github_server = create_github_mcp_server()
+    repo_context = (
+        f"\n\nGitHub repository: {config.github_repo}" if config.github_repo else ""
+    )
+    opening = (
+        f"Task: {initial_task}{repo_context}\n\n"
+        "Start by reading the repo to ground yourself, then ask me your "
+        "clarifying questions. Do not produce the final plan yet."
+    ) if initial_task else (
+        "I want to plan something, but let me drive. Read the repo first to "
+        "ground yourself, then ask me what I want to build."
+    )
+
+    print("\n===== INTERACTIVE PLAN =====")
+    print("Commands: `/save` writes PLAN.md and exits, `/quit` exits without saving.\n")
+
+    async with ClaudeSDKClient(
+        options=ClaudeAgentOptions(
+            cwd=config.project_dir,
+            system_prompt=INTERACTIVE_PLANNER_PROMPT,
+            allowed_tools=["Read", "Glob", "Grep", "Bash"],
+            permission_mode=config.permission_mode,
+            model=config.light_model,
+            max_turns=config.max_turns,
+            mcp_servers={"github": github_server},
+        )
+    ) as client:
+        await client.query(opening)
+        await _stream_turn(client)
+
+        while True:
+            user_input = await anyio.to_thread.run_sync(input, "\n\n> ")
+            text = user_input.strip()
+            if text == "/quit":
+                print("[plan] Aborted.")
+                return ""
+            if text == "/save":
+                await client.query("FINALIZE")
+                print()
+                final = await _stream_turn(client)
+                return final.strip()
+            if not text:
+                continue
+            await client.query(user_input)
+            await _stream_turn(client)
 
 
 async def run_team(
