@@ -267,6 +267,17 @@ End your response with a concise EXEC REPORT:
 - <command> - <outcome>
 ## Notes for the verifier
 - <anything the verifier should know>
+## Suggested commit message
+```
+<subject line, imperative mood, <= 72 chars, describes the feature>
+
+<body: 2-5 short lines explaining WHAT changed and WHY, wrapped ~72 chars.
+Reference the user-visible behavior, not internal mechanics.>
+```
+
+The fenced block above will be parsed and used verbatim as the git commit \
+message. Do not add explanation outside the block. Subject line is the first \
+line; the blank line separates it from the body.
 """
 
 VERIFIER_PROMPT = """\
@@ -319,6 +330,19 @@ End with a FIX REPORT:
 - <path> - <one-line>
 ## Commands run
 - <command> - <outcome>
+## Suggested commit message
+```
+<subject line, imperative mood, <= 72 chars>
+
+<body: describes the overall final state - what the feature does now, not
+just what you fixed this round. You have the executor's report as context;
+write a message that would make sense as the single commit for the whole
+feature, because that is what it will become.>
+```
+
+Format rules identical to the executor's: parsed verbatim, no explanation \
+outside the fence. This message supersedes the executor's because you saw \
+both the build and the fix.
 """
 
 BACKLOG_PLANNER_PROMPT = """\

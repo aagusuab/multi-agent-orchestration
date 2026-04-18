@@ -5,6 +5,7 @@ and artifacts are threaded forward as plain text. The exec/verify/fix loop
 runs until the verifier emits `VERIFICATION: PASS` or the iteration cap hits.
 """
 
+import re
 from dataclasses import dataclass, field
 
 import anyio
@@ -50,6 +51,28 @@ class TeamRunResult:
     fix_reports: list[str] = field(default_factory=list)
     passed: bool = False
     iterations: int = 0
+    commit_message: str = ""
+
+
+_COMMIT_MSG_RE = re.compile(
+    r"##\s+Suggested commit message\s*\n+```[^\n]*\n(.*?)\n```",
+    re.DOTALL,
+)
+
+
+def _extract_commit_message(report: str) -> str:
+    """Pull the fenced commit message out of an Exec/Fix Report. Empty if absent."""
+    m = _COMMIT_MSG_RE.search(report or "")
+    return m.group(1).strip() if m else ""
+
+
+def _best_commit_message(exec_report: str, fix_reports: list[str]) -> str:
+    """Prefer the latest fix's message (it saw exec + fixes). Fall back to exec."""
+    for fr in reversed(fix_reports):
+        msg = _extract_commit_message(fr)
+        if msg:
+            return msg
+    return _extract_commit_message(exec_report)
 
 
 async def _run_stage(
@@ -293,14 +316,24 @@ async def run_team(
         )
         result.fix_reports.append(fix_report)
 
+    result.commit_message = _best_commit_message(result.exec_report, result.fix_reports)
+
     print("\n\n===== TEAM RUN SUMMARY =====")
     print(f"Passed: {result.passed}")
     print(f"Iterations: {result.iterations}")
     print(f"Fix rounds: {len(result.fix_reports)}")
+    if result.commit_message:
+        print(f"Commit message: {result.commit_message.splitlines()[0]}")
 
     if create_pr_on_pass and result.passed:
         print("\n===== CREATING PR =====")
-        pr_result = create_pr(task, result.prd, config.project_dir, config.branch_prefix)
+        pr_result = create_pr(
+            task,
+            result.prd,
+            config.project_dir,
+            config.branch_prefix,
+            commit_message=result.commit_message or None,
+        )
         print(pr_result.summary())
 
     return result
