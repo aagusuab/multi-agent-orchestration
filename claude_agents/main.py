@@ -83,7 +83,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="After a passing team/build run, branch + commit + push + open a PR (requires `gh`).",
     )
-    return parser.parse_args()
+    # parse_intermixed_args handles the case where `nargs=?` positionals follow
+    # store_true flags (e.g., `claude-agents plan --interactive "task"`).
+    return parser.parse_intermixed_args()
 
 
 COMMAND_TO_AGENT = {
