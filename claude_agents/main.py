@@ -8,6 +8,7 @@ import anyio
 from .agents import run_agent
 from .config import AgentConfig
 from .orchestrator import run_orchestrator
+from .team_orchestrator import run_team
 
 
 def parse_args() -> argparse.Namespace:
@@ -16,8 +17,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "command",
-        choices=["pm", "feature", "review", "docs", "bugfix", "pr-review"],
-        help="Which agent to run (pm = Project Manager orchestrator)",
+        choices=["pm", "team", "feature", "review", "docs", "bugfix", "pr-review"],
+        help="Which agent to run (pm = freeform orchestrator, team = staged pipeline)",
     )
     parser.add_argument(
         "task",
@@ -50,6 +51,12 @@ def parse_args() -> argparse.Namespace:
         default=5.0,
         help="Max budget in USD per agent run (default: 5.0)",
     )
+    parser.add_argument(
+        "--max-fix-iters",
+        type=int,
+        default=3,
+        help="Max verify/fix iterations for team mode (default: 3)",
+    )
     return parser.parse_args()
 
 
@@ -75,6 +82,8 @@ async def async_main():
 
     if args.command == "pm":
         await run_orchestrator(args.task, config)
+    elif args.command == "team":
+        await run_team(args.task, config, max_fix_iters=args.max_fix_iters)
     else:
         agent_name = COMMAND_TO_AGENT[args.command]
         await run_agent(agent_name, args.task, config)
