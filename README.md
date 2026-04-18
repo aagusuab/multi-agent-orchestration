@@ -38,6 +38,28 @@ A multi-agent system for software engineering workflows, built on the [Claude Ag
 
 The **Project Manager** agent uses the Claude Agent SDK's subagent system to spawn specialized agents as needed. Each subagent runs with its own system prompt, tool set, and isolated context. GitHub integration is handled via custom MCP tools wrapping the `gh` CLI.
 
+## Orchestration Modes
+
+Two orchestration modes are available:
+
+### PM mode (freeform)
+A single Project Manager agent analyzes the task and decides which subagents to invoke, in what order. Flexible — good when the shape of the work isn't known up front.
+
+### Team mode (staged pipeline)
+A deterministic pipeline with a verify/fix loop:
+
+```
+plan -> PRD -> exec -> [ verify -> fix ] * N
+```
+
+- **Plan** (read-only): a Principal Engineer drafts a plan from the repo state.
+- **PRD** (read-only): a Tech Lead converts the plan into testable acceptance criteria.
+- **Exec** (write): the executor implements against the PRD.
+- **Verify** (read-only): the verifier runs tests/commands against each acceptance criterion and emits `VERIFICATION: PASS` or `VERIFICATION: FAIL`.
+- **Fix** (write): if the verifier fails, the fixer applies minimal changes and the loop re-verifies.
+
+The loop terminates early on PASS or when `--max-fix-iters` is exhausted. Plan/PRD/verify run on the light model to keep costs down; exec/fix run on the default model.
+
 ## Prerequisites
 
 - Python 3.10+
@@ -54,7 +76,7 @@ pip install -e .
 
 ## Usage
 
-### Project Manager (Orchestrator)
+### Project Manager (freeform orchestrator)
 
 Let the PM analyze your project and delegate work across all agents:
 
@@ -62,6 +84,16 @@ Let the PM analyze your project and delegate work across all agents:
 claude-agents pm "Review open issues, fix critical bugs, then do a security audit" \
   --project-dir /path/to/your/project \
   --repo owner/repo
+```
+
+### Team (staged pipeline)
+
+Run the plan -> PRD -> exec -> verify -> fix pipeline for a single task. Best when you want deterministic stages and a persistent verify/fix loop until acceptance criteria pass:
+
+```bash
+claude-agents team "Add a token-bucket rate limiter middleware to the API" \
+  --project-dir /path/to/your/project \
+  --max-fix-iters 3
 ```
 
 ### Individual Agents
@@ -94,17 +126,19 @@ claude-agents pr-review "Review PR #15" -d /path/to/project -r owner/repo
 | `--model`, `-m` | Claude model to use | `claude-opus-4-6` |
 | `--max-turns` | Max agent turns per run | `200` |
 | `--max-budget` | Max budget in USD per run | `5.0` |
+| `--max-fix-iters` | Max verify/fix iterations (team mode only) | `3` |
 
 ## Project Structure
 
 ```
 claude_agents/
-  config.py        # AgentConfig dataclass
-  prompts.py       # System prompts for all 6 agents
-  tools.py         # Custom MCP tools for GitHub integration
-  agents.py        # Agent definitions and standalone runner
-  orchestrator.py  # PM agent that coordinates subagents
-  main.py          # CLI entry point
+  config.py              # AgentConfig dataclass
+  prompts.py             # System prompts for all agents and pipeline stages
+  tools.py               # Custom MCP tools for GitHub integration
+  agents.py              # Agent definitions and standalone runner
+  orchestrator.py        # PM agent that coordinates subagents (freeform mode)
+  team_orchestrator.py   # Staged pipeline with verify/fix loop (team mode)
+  main.py                # CLI entry point
 ```
 
 ## License
