@@ -20,6 +20,7 @@ from claude_agent_sdk import (
 )
 
 from .config import AgentConfig
+from .pr_creator import create_pr
 from .prompts import (
     PLANNER_PROMPT,
     INTERACTIVE_PLANNER_PROMPT,
@@ -185,6 +186,7 @@ async def run_team(
     config: AgentConfig,
     max_fix_iters: int = 3,
     plan: str | None = None,
+    create_pr_on_pass: bool = False,
 ) -> TeamRunResult:
     """Run the staged Team pipeline for a single task.
 
@@ -193,6 +195,10 @@ async def run_team(
 
     If `plan` is provided, the PLAN stage is skipped and the supplied plan is
     threaded forward to the PRD stage.
+
+    If `create_pr_on_pass` is True and verification passes, the changes are
+    branched, committed, pushed, and opened as a PR (gh required for the
+    final PR step).
     """
     github_server = create_github_mcp_server()
     result = TeamRunResult()
@@ -291,4 +297,10 @@ async def run_team(
     print(f"Passed: {result.passed}")
     print(f"Iterations: {result.iterations}")
     print(f"Fix rounds: {len(result.fix_reports)}")
+
+    if create_pr_on_pass and result.passed:
+        print("\n===== CREATING PR =====")
+        pr_result = create_pr(task, result.prd, config.project_dir, config.branch_prefix)
+        print(pr_result.summary())
+
     return result

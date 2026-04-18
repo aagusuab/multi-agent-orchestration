@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="For `plan`: converse with the planner turn-by-turn instead of one-shot. Use /save to write PLAN.md.",
     )
+    parser.add_argument(
+        "--create-pr",
+        action="store_true",
+        help="After a passing team/build run, branch + commit + push + open a PR (requires `gh`).",
+    )
     return parser.parse_args()
 
 
@@ -137,6 +142,7 @@ async def async_main():
             config,
             max_fix_iters=args.max_fix_iters,
             plan=plan_text,
+            create_pr_on_pass=args.create_pr,
         )
     elif args.command == "build":
         await run_build(
@@ -144,6 +150,7 @@ async def async_main():
             config,
             max_tasks=args.max_tasks,
             max_fix_iters=args.max_fix_iters,
+            create_pr_on_pass=args.create_pr,
         )
     else:
         agent_name = COMMAND_TO_AGENT[args.command]

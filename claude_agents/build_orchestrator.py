@@ -98,6 +98,7 @@ async def run_build(
     config: AgentConfig,
     max_tasks: int = 20,
     max_fix_iters: int = 3,
+    create_pr_on_pass: bool = False,
 ) -> BuildRunResult:
     """Generate or resume a backlog, then run the team pipeline per task.
 
@@ -134,7 +135,12 @@ async def run_build(
         executed += 1
         print(f"\n\n===== TASK {executed}/{max_tasks}: {task} =====\n")
 
-        team_result = await run_team(task, config, max_fix_iters=max_fix_iters)
+        team_result = await run_team(
+            task,
+            config,
+            max_fix_iters=max_fix_iters,
+            create_pr_on_pass=create_pr_on_pass,
+        )
         result.task_results.append((task, team_result))
 
         _mark_task(path, raw_line, PASSED if team_result.passed else FAILED)
