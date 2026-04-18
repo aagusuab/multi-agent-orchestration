@@ -30,6 +30,11 @@ PASS_SENTINEL = "VERIFICATION: PASS"
 FAIL_SENTINEL = "VERIFICATION: FAIL"
 
 
+def _join_sections(*sections: str) -> str:
+    """Join non-empty sections with a markdown horizontal-rule separator."""
+    return "\n\n---\n\n".join(s for s in sections if s and s.strip())
+
+
 @dataclass
 class TeamRunResult:
     plan: str = ""
@@ -74,50 +79,80 @@ async def _run_stage(
     return result_text
 
 
+async def run_plan(task: str, config: AgentConfig) -> str:
+    """Run only the PLAN stage and return its markdown output.
+
+    Used by the standalone `plan` command so the user can review/edit a plan
+    before feeding it into `team --plan-file`.
+    """
+    github_server = create_github_mcp_server()
+    repo_context = (
+        f"\n\nGitHub repository: {config.github_repo}" if config.github_repo else ""
+    )
+    base_task = f"Task: {task}{repo_context}"
+    return await _run_stage(
+        "PLAN",
+        PLANNER_PROMPT,
+        base_task,
+        config,
+        ["Read", "Glob", "Grep", "Bash"],
+        github_server,
+        model=config.light_model,
+    )
+
+
 async def run_team(
     task: str,
     config: AgentConfig,
     max_fix_iters: int = 3,
+    plan: str | None = None,
 ) -> TeamRunResult:
     """Run the staged Team pipeline for a single task.
 
     Stages: plan -> PRD -> exec -> verify -> (fix -> verify) * up to max_fix_iters.
     Terminates early when the verifier emits VERIFICATION: PASS.
+
+    If `plan` is provided, the PLAN stage is skipped and the supplied plan is
+    threaded forward to the PRD stage.
     """
     github_server = create_github_mcp_server()
     result = TeamRunResult()
 
-    repo_context = (
-        f"\n\nGitHub repository: {config.github_repo}" if config.github_repo else ""
-    )
-    base_task = f"Task: {task}{repo_context}"
+    sections = []
+    if task:
+        sections.append(f"Task: {task}")
+    if config.github_repo:
+        sections.append(f"GitHub repository: {config.github_repo}")
+    base_task = "\n\n".join(sections)
 
     read_only_tools = ["Read", "Glob", "Grep", "Bash"]
     write_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 
-    result.plan = await _run_stage(
-        "PLAN",
-        PLANNER_PROMPT,
-        base_task,
-        config,
-        read_only_tools,
-        github_server,
-        model=config.light_model,
-    )
+    if plan is not None:
+        print("\n\n===== STAGE: PLAN (provided, skipping generation) =====\n")
+        result.plan = plan
+    else:
+        result.plan = await _run_stage(
+            "PLAN",
+            PLANNER_PROMPT,
+            base_task,
+            config,
+            read_only_tools,
+            github_server,
+            model=config.light_model,
+        )
 
     result.prd = await _run_stage(
         "PRD",
         PRD_PROMPT,
-        f"{base_task}\n\n---\n\n{result.plan}",
+        _join_sections(base_task, result.plan),
         config,
         read_only_tools,
         github_server,
         model=config.light_model,
     )
 
-    exec_input = (
-        f"{base_task}\n\n---\n\n{result.plan}\n\n---\n\n{result.prd}"
-    )
+    exec_input = _join_sections(base_task, result.plan, result.prd)
     result.exec_report = await _run_stage(
         "EXEC",
         EXEC_LEAD_PROMPT,

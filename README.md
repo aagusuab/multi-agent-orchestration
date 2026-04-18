@@ -40,7 +40,7 @@ The **Project Manager** agent uses the Claude Agent SDK's subagent system to spa
 
 ## Orchestration Modes
 
-Two orchestration modes are available:
+Four orchestration modes are available:
 
 ### PM mode (freeform)
 A single Project Manager agent analyzes the task and decides which subagents to invoke, in what order. Flexible — good when the shape of the work isn't known up front.
@@ -59,6 +59,21 @@ plan -> PRD -> exec -> [ verify -> fix ] * N
 - **Fix** (write): if the verifier fails, the fixer applies minimal changes and the loop re-verifies.
 
 The loop terminates early on PASS or when `--max-fix-iters` is exhausted. Plan/PRD/verify run on the light model to keep costs down; exec/fix run on the default model.
+
+### Plan mode (planner stage only)
+Runs just the planner and writes the result to `PLAN.md` in the project directory. Lets you review/edit the plan before committing to implementation. Feed the approved plan back into team mode with `--plan-file`.
+
+### Build mode (multi-feature outer loop)
+Takes a product vision, generates an ordered backlog of tasks (`BACKLOG.md` in the project dir), then runs the full team pipeline once per task:
+
+```
+vision -> backlog planner -> BACKLOG.md
+           for each [ ] task in BACKLOG.md:
+               team pipeline (plan -> PRD -> exec -> verify -> fix)
+               mark [x] on pass / [!] on fail
+```
+
+The backlog is persisted, so runs are **resumable** — re-running `build` against an existing `BACKLOG.md` continues from the next unchecked task. You can also hand-edit the backlog between runs. Failed tasks are marked `- [!]` and skipped; the loop does not abort on failure.
 
 ## Prerequisites
 
@@ -96,6 +111,33 @@ claude-agents team "Add a token-bucket rate limiter middleware to the API" \
   --max-fix-iters 3
 ```
 
+### Plan, then team (review the plan before executing)
+
+Generate a plan, review/edit `PLAN.md`, then run team mode against the approved plan:
+
+```bash
+claude-agents plan "Add a token-bucket rate limiter middleware to the API" \
+  --project-dir /path/to/your/project
+# edit PLAN.md as needed
+claude-agents team --plan-file PLAN.md \
+  --project-dir /path/to/your/project
+```
+
+When `--plan-file` is used, the `task` argument is optional — the plan's `## Goal` section carries the intent.
+
+### Build (multi-feature outer loop)
+
+Describe a product vision and let the system decompose it into a backlog and execute each task through the full team pipeline:
+
+```bash
+claude-agents build "A CLI todo app with SQLite storage, add/list/complete commands, and JSON export" \
+  --project-dir /path/to/new/project \
+  --max-tasks 10 \
+  --max-fix-iters 3
+```
+
+`BACKLOG.md` is written to the project directory. Re-run the same command to resume from the next `- [ ]` task. Edit the backlog file between runs to adjust priorities or add tasks.
+
 ### Individual Agents
 
 Run any agent directly for focused tasks:
@@ -126,7 +168,9 @@ claude-agents pr-review "Review PR #15" -d /path/to/project -r owner/repo
 | `--model`, `-m` | Claude model to use | `claude-opus-4-6` |
 | `--max-turns` | Max agent turns per run | `200` |
 | `--max-budget` | Max budget in USD per run | `5.0` |
-| `--max-fix-iters` | Max verify/fix iterations (team mode only) | `3` |
+| `--max-fix-iters` | Max verify/fix iterations (team/build modes) | `3` |
+| `--max-tasks` | Max backlog tasks to execute (build mode only) | `20` |
+| `--plan-file` | Path to a pre-approved plan file (team mode) | |
 
 ## Project Structure
 
@@ -137,7 +181,8 @@ claude_agents/
   tools.py               # Custom MCP tools for GitHub integration
   agents.py              # Agent definitions and standalone runner
   orchestrator.py        # PM agent that coordinates subagents (freeform mode)
-  team_orchestrator.py   # Staged pipeline with verify/fix loop (team mode)
+  team_orchestrator.py   # Staged pipeline with verify/fix loop (team mode, plan mode)
+  build_orchestrator.py  # Multi-feature outer loop over a persisted backlog (build mode)
   main.py                # CLI entry point
 ```
 
