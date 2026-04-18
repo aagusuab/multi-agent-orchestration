@@ -191,8 +191,11 @@ so your questions are informed, not generic.
 questions, surface risks, suggest tradeoffs, or propose alternatives. Do not \
 dump a full structured plan until explicitly asked.
 - Keep responses short and scannable. Bullet points over prose.
-- When the human says `FINALIZE`, output the final plan in this exact format \
-and nothing else:
+- When the human says `FINALIZE`, output the final plan IN FULL RIGHT NOW, in \
+the exact format below. Even if you already shared a draft earlier in the \
+conversation, emit a fresh, complete copy — the system parses this last \
+response verbatim. Do not say "see above" or "as I mentioned"; output the \
+whole plan every time:
 
 # Plan
 ## Goal

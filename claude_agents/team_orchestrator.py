@@ -150,12 +150,26 @@ async def _stream_turn(client: ClaudeSDKClient) -> str:
     return buffered
 
 
+_PLAN_BLOCK_RE = re.compile(r"(# Plan\b.*?)(?=\n#\s|\Z)", re.DOTALL)
+
+
+def _extract_last_plan(text: str) -> str:
+    """Return the last `# Plan` block found in text, stripped. Empty if none."""
+    matches = _PLAN_BLOCK_RE.findall(text or "")
+    return matches[-1].strip() if matches else ""
+
+
 async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
     """Interactive planning session. Returns the final plan markdown.
 
     The user converses with the planner until typing `/save`, at which point
     the agent is asked to emit the final structured plan. `/quit` aborts
     without saving.
+
+    Robustness: the full assistant transcript is buffered so that if the
+    final FINALIZE response doesn't contain a `# Plan` block (e.g., the
+    agent points back at an earlier draft), we fall back to the most recent
+    `# Plan` block anywhere in the conversation.
     """
     github_server = create_github_mcp_server()
     repo_context = (
@@ -173,6 +187,8 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
     print("\n===== INTERACTIVE PLAN =====")
     print("Commands: `/save` writes PLAN.md and exits, `/quit` exits without saving.\n")
 
+    transcript = ""
+
     async with ClaudeSDKClient(
         options=ClaudeAgentOptions(
             cwd=config.project_dir,
@@ -185,7 +201,7 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
         )
     ) as client:
         await client.query(opening)
-        await _stream_turn(client)
+        transcript += await _stream_turn(client) + "\n\n"
 
         while True:
             user_input = await anyio.to_thread.run_sync(input, "\n\n> ")
@@ -194,14 +210,38 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
                 print("[plan] Aborted.")
                 return ""
             if text == "/save":
-                await client.query("FINALIZE")
+                await client.query(
+                    "FINALIZE. Output the complete final plan right now in "
+                    "the structured `# Plan` markdown format from your "
+                    "instructions. Emit the whole plan verbatim - do not "
+                    "reference earlier messages. This response is parsed "
+                    "and saved as-is."
+                )
                 print()
                 final = await _stream_turn(client)
-                return final.strip()
+                transcript += final + "\n\n"
+
+                plan = _extract_last_plan(final)
+                if not plan:
+                    plan = _extract_last_plan(transcript)
+                    if plan:
+                        print(
+                            "\n[plan] Finalize response had no `# Plan` "
+                            "block; recovered the most recent one from the "
+                            "conversation."
+                        )
+                if not plan:
+                    print(
+                        "\n[plan] WARNING: No `# Plan` block found anywhere "
+                        "in the conversation. Saving raw last response - "
+                        "you will likely need to re-plan."
+                    )
+                    plan = final.strip()
+                return plan
             if not text:
                 continue
             await client.query(user_input)
-            await _stream_turn(client)
+            transcript += await _stream_turn(client) + "\n\n"
 
 
 async def run_team(
