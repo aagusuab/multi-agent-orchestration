@@ -7,6 +7,7 @@ runs until the verifier emits `VERIFICATION: PASS` or the iteration cap hits.
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import anyio
 
@@ -28,6 +29,7 @@ from .prompts import (
     PRD_PROMPT,
     EXEC_LEAD_PROMPT,
     VERIFIER_PROMPT,
+    INTERACTIVE_VERIFIER_PROMPT,
     FIXER_PROMPT,
 )
 from .tools import create_github_mcp_server
@@ -324,6 +326,71 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
             transcript += await _stream_turn(client, tracker, f"turn {turn_counter}") + "\n\n"
 
 
+async def run_verify_interactive(
+    prd: str,
+    exec_report: str | None,
+    config: AgentConfig,
+) -> None:
+    """Interactive verification session.
+
+    Feeds the verifier the PRD (and optionally the most recent exec report),
+    runs an initial PASS/FAIL check against the current repo state, then
+    lets the user ask follow-up questions. Read-only — the agent cannot
+    modify code.
+    """
+    github_server = create_github_mcp_server()
+
+    opening_parts = ["Here is the PRD to verify:", prd]
+    if exec_report:
+        opening_parts += [
+            "---",
+            "Most recent executor report for context:",
+            exec_report,
+        ]
+    opening_parts += [
+        "---",
+        "Run each acceptance criterion against the current repo state. "
+        "For each one, emit `[PASS|FAIL] <criterion>` with concrete "
+        "evidence (test name, command output, file:line). End with a short "
+        "list of decisions for me to make. Then wait for my follow-ups.",
+    ]
+    opening = "\n\n".join(opening_parts)
+
+    print("\n===== INTERACTIVE VERIFY =====")
+    print("Commands: `/quit` to exit. Read-only session - agent cannot edit code.\n")
+
+    tracker = TokenTracker()
+    turn = 0
+
+    async with ClaudeSDKClient(
+        options=ClaudeAgentOptions(
+            cwd=config.project_dir,
+            system_prompt=INTERACTIVE_VERIFIER_PROMPT,
+            allowed_tools=["Read", "Glob", "Grep", "Bash"],
+            permission_mode=config.permission_mode,
+            model=config.light_model,
+            max_turns=config.max_turns,
+            mcp_servers={"github": github_server},
+        )
+    ) as client:
+        await client.query(opening)
+        turn += 1
+        await _stream_turn(client, tracker, f"turn {turn}")
+
+        while True:
+            user_input = await anyio.to_thread.run_sync(input, "\n\n> ")
+            text = user_input.strip()
+            if text == "/quit":
+                print("[verify] Exiting.")
+                print(tracker.summary("INTERACTIVE VERIFY TOKEN USAGE"))
+                return
+            if not text:
+                continue
+            await client.query(user_input)
+            turn += 1
+            await _stream_turn(client, tracker, f"turn {turn}")
+
+
 async def run_team(
     task: str,
     config: AgentConfig,
@@ -442,6 +509,17 @@ async def run_team(
         result.fix_reports.append(fix_report)
 
     result.commit_message = _best_commit_message(result.exec_report, result.fix_reports)
+
+    project_dir = Path(config.project_dir)
+    if result.prd:
+        (project_dir / "PRD.md").write_text(result.prd)
+    exec_artifact = result.exec_report or ""
+    if result.fix_reports:
+        exec_artifact += "\n\n---\n\n" + "\n\n---\n\n".join(
+            f"Fix iter {i + 1}:\n{fr}" for i, fr in enumerate(result.fix_reports)
+        )
+    if exec_artifact:
+        (project_dir / "EXEC_REPORT.md").write_text(exec_artifact)
 
     print("\n\n===== TEAM RUN SUMMARY =====")
     print(f"Passed: {result.passed}")

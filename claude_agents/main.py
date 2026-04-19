@@ -10,7 +10,12 @@ from .agents import run_agent
 from .build_orchestrator import run_build
 from .config import AgentConfig
 from .orchestrator import run_orchestrator
-from .team_orchestrator import run_plan, run_plan_interactive, run_team
+from .team_orchestrator import (
+    run_plan,
+    run_plan_interactive,
+    run_team,
+    run_verify_interactive,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,8 +24,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "command",
-        choices=["pm", "team", "build", "plan", "feature", "review", "docs", "bugfix", "pr-review"],
-        help="Which agent to run (pm = freeform orchestrator, team = staged pipeline, build = multi-feature loop, plan = planner stage only)",
+        choices=["pm", "team", "build", "plan", "verify", "feature", "review", "docs", "bugfix", "pr-review"],
+        help="Which agent to run (pm = freeform, team = staged pipeline, build = multi-feature loop, plan = planner only, verify = interactive verify against a PRD)",
     )
     parser.add_argument(
         "task",
@@ -83,6 +88,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="After a passing team/build run, branch + commit + push + open a PR (requires `gh`).",
     )
+    parser.add_argument(
+        "--prd-file",
+        default="",
+        help="Path to a PRD file. Used by `verify` to check the repo against "
+             "acceptance criteria. Defaults to PRD.md in --project-dir.",
+    )
+    parser.add_argument(
+        "--exec-file",
+        default="",
+        help="Path to an exec report file. Optional context for `verify`. "
+             "Defaults to EXEC_REPORT.md in --project-dir if present.",
+    )
     # parse_intermixed_args handles the case where `nargs=?` positionals follow
     # store_true flags (e.g., `claude-agents plan --interactive "task"`).
     return parser.parse_intermixed_args()
@@ -103,11 +120,12 @@ async def async_main():
     task_optional = (
         (args.command == "team" and args.plan_file)
         or (args.command == "plan" and args.interactive)
+        or args.command == "verify"
     )
     if not args.task and not task_optional:
         sys.exit(
-            "Error: `task` is required except for `team --plan-file` or "
-            "`plan --interactive`."
+            "Error: `task` is required except for `team --plan-file`, "
+            "`plan --interactive`, or `verify`."
         )
 
     config = AgentConfig(
@@ -154,6 +172,19 @@ async def async_main():
             max_fix_iters=args.max_fix_iters,
             create_pr_on_pass=args.create_pr,
         )
+    elif args.command == "verify":
+        prd_path = Path(args.prd_file) if args.prd_file else Path(config.project_dir) / "PRD.md"
+        if not prd_path.exists():
+            sys.exit(
+                f"Error: PRD not found at {prd_path}. Pass --prd-file or "
+                "run a team pipeline first (which auto-saves PRD.md)."
+            )
+        prd_text = prd_path.read_text()
+        exec_path = Path(args.exec_file) if args.exec_file else Path(config.project_dir) / "EXEC_REPORT.md"
+        exec_text = exec_path.read_text() if exec_path.exists() else None
+        if exec_text:
+            print(f"[verify] Using exec context from {exec_path}")
+        await run_verify_interactive(prd_text, exec_text, config)
     else:
         agent_name = COMMAND_TO_AGENT[args.command]
         await run_agent(agent_name, args.task, config)
