@@ -43,6 +43,62 @@ def _join_sections(*sections: str) -> str:
 
 
 @dataclass
+class TokenTracker:
+    """Accumulates token usage and cost across agent stages."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation: int = 0
+    cache_read: int = 0
+    cost_usd: float = 0.0
+    stages: list[tuple[str, dict]] = field(default_factory=list)
+
+    def record(self, stage_name: str, rm) -> None:
+        usage = rm.usage or {} if hasattr(rm, "usage") else {}
+        cost = (rm.total_cost_usd or 0.0) if hasattr(rm, "total_cost_usd") else 0.0
+        entry = {
+            "input": usage.get("input_tokens", 0),
+            "output": usage.get("output_tokens", 0),
+            "cache_create": usage.get("cache_creation_input_tokens", 0),
+            "cache_read": usage.get("cache_read_input_tokens", 0),
+            "cost": cost,
+        }
+        self.input_tokens += entry["input"]
+        self.output_tokens += entry["output"]
+        self.cache_creation += entry["cache_create"]
+        self.cache_read += entry["cache_read"]
+        self.cost_usd += cost
+        self.stages.append((stage_name, entry))
+
+    def absorb(self, other: "TokenTracker") -> None:
+        self.input_tokens += other.input_tokens
+        self.output_tokens += other.output_tokens
+        self.cache_creation += other.cache_creation
+        self.cache_read += other.cache_read
+        self.cost_usd += other.cost_usd
+        self.stages.extend(other.stages)
+
+    def summary(self, title: str = "TOKEN USAGE") -> str:
+        lines = [f"\n===== {title} ====="]
+        lines.append(
+            f"{'stage':<30} {'in':>8} {'out':>8} "
+            f"{'cache_r':>8} {'cache_w':>8} {'cost':>10}"
+        )
+        for name, u in self.stages:
+            lines.append(
+                f"{name[:30]:<30} {u['input']:>8} {u['output']:>8} "
+                f"{u['cache_read']:>8} {u['cache_create']:>8} "
+                f"${u['cost']:>9.4f}"
+            )
+        lines.append("-" * 78)
+        lines.append(
+            f"{'TOTAL':<30} {self.input_tokens:>8} {self.output_tokens:>8} "
+            f"{self.cache_read:>8} {self.cache_creation:>8} "
+            f"${self.cost_usd:>9.4f}"
+        )
+        return "\n".join(lines)
+
+
+@dataclass
 class TeamRunResult:
     plan: str = ""
     prd: str = ""
@@ -52,6 +108,7 @@ class TeamRunResult:
     passed: bool = False
     iterations: int = 0
     commit_message: str = ""
+    token_tracker: "TokenTracker" = field(default_factory=lambda: TokenTracker())
 
 
 _COMMIT_MSG_RE = re.compile(
@@ -83,10 +140,12 @@ async def _run_stage(
     tools: list[str],
     github_server,
     model: str | None = None,
+    tracker: TokenTracker | None = None,
 ) -> str:
     """Run one pipeline stage as a single query() call, streaming output."""
     print(f"\n\n===== STAGE: {stage_name} =====\n")
     result_text = ""
+    last_result_msg = None
     async for message in query(
         prompt=user_prompt,
         options=ClaudeAgentOptions(
@@ -101,10 +160,13 @@ async def _run_stage(
     ):
         if isinstance(message, ResultMessage):
             result_text = message.result or result_text
+            last_result_msg = message
         elif isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
                     print(block.text, end="", flush=True)
+    if tracker is not None and last_result_msg is not None:
+        tracker.record(stage_name, last_result_msg)
     return result_text
 
 
@@ -119,7 +181,8 @@ async def run_plan(task: str, config: AgentConfig) -> str:
         f"\n\nGitHub repository: {config.github_repo}" if config.github_repo else ""
     )
     base_task = f"Task: {task}{repo_context}"
-    return await _run_stage(
+    tracker = TokenTracker()
+    result = await _run_stage(
         "PLAN",
         PLANNER_PROMPT,
         base_task,
@@ -127,14 +190,24 @@ async def run_plan(task: str, config: AgentConfig) -> str:
         ["Read", "Glob", "Grep", "Bash"],
         github_server,
         model=config.light_model,
+        tracker=tracker,
     )
+    print(tracker.summary("PLAN TOKEN USAGE"))
+    return result
 
 
-async def _stream_turn(client: ClaudeSDKClient) -> str:
+async def _stream_turn(
+    client: ClaudeSDKClient,
+    tracker: TokenTracker | None = None,
+    stage_label: str = "turn",
+) -> str:
     """Consume one response turn, printing text and tool activity. Returns final text."""
     buffered = ""
     async for message in client.receive_response():
-        if isinstance(message, AssistantMessage):
+        if isinstance(message, ResultMessage):
+            if tracker is not None:
+                tracker.record(stage_label, message)
+        elif isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
                     print(block.text, end="", flush=True)
@@ -188,6 +261,8 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
     print("Commands: `/save` writes PLAN.md and exits, `/quit` exits without saving.\n")
 
     transcript = ""
+    tracker = TokenTracker()
+    turn_counter = 0
 
     async with ClaudeSDKClient(
         options=ClaudeAgentOptions(
@@ -201,13 +276,15 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
         )
     ) as client:
         await client.query(opening)
-        transcript += await _stream_turn(client) + "\n\n"
+        turn_counter += 1
+        transcript += await _stream_turn(client, tracker, f"turn {turn_counter}") + "\n\n"
 
         while True:
             user_input = await anyio.to_thread.run_sync(input, "\n\n> ")
             text = user_input.strip()
             if text == "/quit":
                 print("[plan] Aborted.")
+                print(tracker.summary("INTERACTIVE PLAN TOKEN USAGE"))
                 return ""
             if text == "/save":
                 await client.query(
@@ -218,8 +295,10 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
                     "and saved as-is."
                 )
                 print()
-                final = await _stream_turn(client)
+                turn_counter += 1
+                final = await _stream_turn(client, tracker, f"turn {turn_counter} (finalize)")
                 transcript += final + "\n\n"
+                print(tracker.summary("INTERACTIVE PLAN TOKEN USAGE"))
 
                 plan = _extract_last_plan(final)
                 if not plan:
@@ -241,7 +320,8 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
             if not text:
                 continue
             await client.query(user_input)
-            transcript += await _stream_turn(client) + "\n\n"
+            turn_counter += 1
+            transcript += await _stream_turn(client, tracker, f"turn {turn_counter}") + "\n\n"
 
 
 async def run_team(
@@ -288,6 +368,7 @@ async def run_team(
             read_only_tools,
             github_server,
             model=config.light_model,
+            tracker=result.token_tracker,
         )
 
     result.prd = await _run_stage(
@@ -298,6 +379,7 @@ async def run_team(
         read_only_tools,
         github_server,
         model=config.light_model,
+        tracker=result.token_tracker,
     )
 
     exec_input = _join_sections(base_task, result.plan, result.prd)
@@ -308,6 +390,7 @@ async def run_team(
         config,
         write_tools,
         github_server,
+        tracker=result.token_tracker,
     )
 
     for iteration in range(max_fix_iters + 1):
@@ -326,6 +409,7 @@ async def run_team(
             read_only_tools,
             github_server,
             model=config.light_model,
+            tracker=result.token_tracker,
         )
         result.verify_reports.append(verify_report)
 
@@ -353,6 +437,7 @@ async def run_team(
             config,
             write_tools,
             github_server,
+            tracker=result.token_tracker,
         )
         result.fix_reports.append(fix_report)
 
@@ -364,6 +449,7 @@ async def run_team(
     print(f"Fix rounds: {len(result.fix_reports)}")
     if result.commit_message:
         print(f"Commit message: {result.commit_message.splitlines()[0]}")
+    print(result.token_tracker.summary("TEAM RUN TOKEN USAGE"))
 
     if create_pr_on_pass and result.passed:
         print("\n===== CREATING PR =====")

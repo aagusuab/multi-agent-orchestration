@@ -18,7 +18,7 @@ from claude_agent_sdk import (
 
 from .config import AgentConfig
 from .prompts import BACKLOG_PLANNER_PROMPT
-from .team_orchestrator import TeamRunResult, run_team
+from .team_orchestrator import TeamRunResult, TokenTracker, run_team
 from .tools import create_github_mcp_server
 
 
@@ -35,6 +35,7 @@ class BuildRunResult:
     backlog_path: str
     task_results: list[tuple[str, TeamRunResult]] = field(default_factory=list)
     completed: bool = False
+    token_tracker: TokenTracker = field(default_factory=TokenTracker)
 
 
 def _backlog_path(config: AgentConfig) -> Path:
@@ -67,11 +68,16 @@ def _mark_task(path: Path, raw_line: str, marker: str) -> None:
     path.write_text(content.replace(raw_line, replacement, 1))
 
 
-async def _generate_backlog(vision: str, config: AgentConfig) -> str:
+async def _generate_backlog(
+    vision: str,
+    config: AgentConfig,
+    tracker: TokenTracker | None = None,
+) -> str:
     """Run the backlog planner and return its raw Markdown output."""
     print("\n\n===== STAGE: BACKLOG PLANNER =====\n")
     github_server = create_github_mcp_server()
     result_text = ""
+    last_rm = None
     async for message in query(
         prompt=f"Product vision:\n\n{vision}",
         options=ClaudeAgentOptions(
@@ -86,10 +92,13 @@ async def _generate_backlog(vision: str, config: AgentConfig) -> str:
     ):
         if isinstance(message, ResultMessage):
             result_text = message.result or result_text
+            last_rm = message
         elif isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
                     print(block.text, end="", flush=True)
+    if tracker is not None and last_rm is not None:
+        tracker.record("BACKLOG PLANNER", last_rm)
     return result_text
 
 
@@ -115,7 +124,7 @@ async def run_build(
     if path.exists():
         print(f"\n[build] Resuming from existing backlog: {path}")
     else:
-        backlog_md = await _generate_backlog(vision, config)
+        backlog_md = await _generate_backlog(vision, config, tracker=result.token_tracker)
         if "# Backlog" not in backlog_md:
             raise RuntimeError(
                 "Backlog planner did not return a recognizable backlog. "
@@ -142,6 +151,7 @@ async def run_build(
             create_pr_on_pass=create_pr_on_pass,
         )
         result.task_results.append((task, team_result))
+        result.token_tracker.absorb(team_result.token_tracker)
 
         _mark_task(path, raw_line, PASSED if team_result.passed else FAILED)
 
@@ -152,4 +162,5 @@ async def run_build(
     print(f"Tasks passed: {passed}")
     print(f"Tasks failed: {len(result.task_results) - passed}")
     print(f"Backlog drained: {result.completed}")
+    print(result.token_tracker.summary("BUILD RUN TOKEN USAGE"))
     return result
