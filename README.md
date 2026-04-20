@@ -171,7 +171,10 @@ Start blank if you'd rather the agent ask what you want to build:
 claude-agents plan --interactive --project-dir /path/to/your/project
 ```
 
-Commands inside the session: `/save` (finalize to `PLAN.md` and exit), `/quit` (abort).
+Commands inside the session:
+- `/save` — finalize to `PLAN.md` and exit.
+- `/save-and-run` — finalize to `PLAN.md`, then immediately run the team pipeline against it (honors `--create-pr` and `--max-fix-iters` from the original invocation).
+- `/quit` — abort without saving.
 
 ### Team with automatic PR
 
@@ -244,7 +247,7 @@ claude-agents pr-review "Review PR #15" -d /path/to/project -r owner/repo
 | `team "<task>"` | Staged pipeline for one task |
 | `team --plan-file PLAN.md` | Staged pipeline using a pre-approved plan (task optional) |
 | `plan "<task>"` | One-shot planner, writes `PLAN.md` |
-| `plan --interactive "<task>"` | Conversational planner, writes `PLAN.md` on `/save` |
+| `plan --interactive "<task>"` | Conversational planner — `/save` writes `PLAN.md`, `/save-and-run` chains into team mode |
 | `build "<vision>"` | Backlog-driven multi-task build |
 | `feature "<task>"` | Individual feature-builder agent |
 | `review "<task>"` | Individual code-reviewer agent |

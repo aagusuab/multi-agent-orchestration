@@ -14,3 +14,4 @@ dependencies = [
 
 [project.scripts]
 claude-agents = "claude_agents.main:run"
+ca = "claude_agents.main:run"

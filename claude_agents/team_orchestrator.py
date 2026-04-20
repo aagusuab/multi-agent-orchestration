@@ -234,12 +234,13 @@ def _extract_last_plan(text: str) -> str:
     return matches[-1].strip() if matches else ""
 
 
-async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
-    """Interactive planning session. Returns the final plan markdown.
+async def run_plan_interactive(initial_task: str, config: AgentConfig) -> tuple[str, bool]:
+    """Interactive planning session. Returns (plan_markdown, auto_run_team).
 
-    The user converses with the planner until typing `/save`, at which point
-    the agent is asked to emit the final structured plan. `/quit` aborts
-    without saving.
+    Commands:
+    - `/save` -> (plan, False): write PLAN.md and exit.
+    - `/save-and-run` -> (plan, True): write PLAN.md and chain into team mode.
+    - `/quit` -> ("", False): abort without saving.
 
     Robustness: the full assistant transcript is buffered so that if the
     final FINALIZE response doesn't contain a `# Plan` block (e.g., the
@@ -260,7 +261,11 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
     )
 
     print("\n===== INTERACTIVE PLAN =====")
-    print("Commands: `/save` writes PLAN.md and exits, `/quit` exits without saving.\n")
+    print(
+        "Commands: `/save` writes PLAN.md and exits, "
+        "`/save-and-run` writes PLAN.md then chains into team mode, "
+        "`/quit` exits without saving.\n"
+    )
 
     transcript = ""
     tracker = TokenTracker()
@@ -287,8 +292,9 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
             if text == "/quit":
                 print("[plan] Aborted.")
                 print(tracker.summary("INTERACTIVE PLAN TOKEN USAGE"))
-                return ""
-            if text == "/save":
+                return "", False
+            if text in ("/save", "/save-and-run"):
+                auto_run = text == "/save-and-run"
                 await client.query(
                     "FINALIZE. Output the complete final plan right now in "
                     "the structured `# Plan` markdown format from your "
@@ -318,7 +324,7 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> str:
                         "you will likely need to re-plan."
                     )
                     plan = final.strip()
-                return plan
+                return plan, auto_run
             if not text:
                 continue
             await client.query(user_input)
@@ -412,6 +418,16 @@ async def run_team(
     """
     github_server = create_github_mcp_server()
     result = TeamRunResult()
+    project_dir = Path(config.project_dir)
+
+    def _save_exec_artifact() -> None:
+        artifact = result.exec_report or ""
+        if result.fix_reports:
+            artifact += "\n\n---\n\n" + "\n\n---\n\n".join(
+                f"Fix iter {i + 1}:\n{fr}" for i, fr in enumerate(result.fix_reports)
+            )
+        if artifact:
+            (project_dir / "EXEC_REPORT.md").write_text(artifact)
 
     sections = []
     if task:
@@ -448,6 +464,9 @@ async def run_team(
         model=config.light_model,
         tracker=result.token_tracker,
     )
+    if result.prd:
+        (project_dir / "PRD.md").write_text(result.prd)
+        print(f"\n[team] PRD saved to {project_dir / 'PRD.md'}")
 
     exec_input = _join_sections(base_task, result.plan, result.prd)
     result.exec_report = await _run_stage(
@@ -459,6 +478,7 @@ async def run_team(
         github_server,
         tracker=result.token_tracker,
     )
+    _save_exec_artifact()
 
     for iteration in range(max_fix_iters + 1):
         result.iterations = iteration + 1
@@ -507,19 +527,9 @@ async def run_team(
             tracker=result.token_tracker,
         )
         result.fix_reports.append(fix_report)
+        _save_exec_artifact()
 
     result.commit_message = _best_commit_message(result.exec_report, result.fix_reports)
-
-    project_dir = Path(config.project_dir)
-    if result.prd:
-        (project_dir / "PRD.md").write_text(result.prd)
-    exec_artifact = result.exec_report or ""
-    if result.fix_reports:
-        exec_artifact += "\n\n---\n\n" + "\n\n---\n\n".join(
-            f"Fix iter {i + 1}:\n{fr}" for i, fr in enumerate(result.fix_reports)
-        )
-    if exec_artifact:
-        (project_dir / "EXEC_REPORT.md").write_text(exec_artifact)
 
     print("\n\n===== TEAM RUN SUMMARY =====")
     print(f"Passed: {result.passed}")

@@ -139,8 +139,9 @@ async def async_main():
     if args.command == "pm":
         await run_orchestrator(args.task, config)
     elif args.command == "plan":
+        auto_run = False
         if args.interactive:
-            plan_text = await run_plan_interactive(args.task, config)
+            plan_text, auto_run = await run_plan_interactive(args.task, config)
             if not plan_text:
                 return
         else:
@@ -148,10 +149,20 @@ async def async_main():
         plan_path = Path(config.project_dir) / "PLAN.md"
         plan_path.write_text(plan_text)
         print(f"\n\n[plan] Plan written to {plan_path}")
-        follow_up_task = f"\"{args.task}\" " if args.task else ""
-        print("[plan] Review/edit, then run: "
-              f"claude-agents team {follow_up_task}-d {config.project_dir} "
-              f"--plan-file {plan_path}")
+        if auto_run:
+            print("[plan] /save-and-run: chaining into team mode with this plan.\n")
+            await run_team(
+                args.task,
+                config,
+                max_fix_iters=args.max_fix_iters,
+                plan=plan_text,
+                create_pr_on_pass=args.create_pr,
+            )
+        else:
+            follow_up_task = f"\"{args.task}\" " if args.task else ""
+            print("[plan] Review/edit, then run: "
+                  f"claude-agents team {follow_up_task}-d {config.project_dir} "
+                  f"--plan-file {plan_path}")
     elif args.command == "team":
         plan_text: str | None = None
         if args.plan_file:
