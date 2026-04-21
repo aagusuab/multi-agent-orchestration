@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import anyio
+from prompt_toolkit import PromptSession
 
 from claude_agent_sdk import (
     query,
@@ -134,6 +134,38 @@ def _best_commit_message(exec_report: str, fix_reports: list[str]) -> str:
     return _extract_commit_message(exec_report)
 
 
+def _print_assistant_blocks(message: AssistantMessage) -> str:
+    """Stream an assistant message's text and tool-use blocks to stdout.
+
+    Separates consecutive messages with a trailing newline so bursts of
+    short commentary ("Now updating X:" + "Now updating Y:") render on
+    their own lines instead of running together. Also prints tool-use
+    markers so the user can see what the agent is actually doing.
+
+    Returns the concatenated text content (for buffering/parsing).
+    """
+    text_parts: list[str] = []
+    last_char_newline = True
+    for block in message.content:
+        if isinstance(block, TextBlock):
+            print(block.text, end="", flush=True)
+            text_parts.append(block.text)
+            last_char_newline = block.text.endswith("\n")
+        elif isinstance(block, ToolUseBlock):
+            args_preview = ""
+            if isinstance(block.input, dict):
+                for key in ("file_path", "pattern", "command", "path"):
+                    if key in block.input:
+                        args_preview = f" {block.input[key]}"
+                        break
+            prefix = "" if last_char_newline else "\n"
+            print(f"{prefix}[→ {block.name}{args_preview}]", flush=True)
+            last_char_newline = True
+    if not last_char_newline:
+        print()
+    return "".join(text_parts)
+
+
 async def _run_stage(
     stage_name: str,
     system_prompt: str,
@@ -164,9 +196,7 @@ async def _run_stage(
             result_text = message.result or result_text
             last_result_msg = message
         elif isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    print(block.text, end="", flush=True)
+            _print_assistant_blocks(message)
     if tracker is not None and last_result_msg is not None:
         tracker.record(stage_name, last_result_msg)
     return result_text
@@ -210,18 +240,7 @@ async def _stream_turn(
             if tracker is not None:
                 tracker.record(stage_label, message)
         elif isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    print(block.text, end="", flush=True)
-                    buffered += block.text
-                elif isinstance(block, ToolUseBlock):
-                    args_preview = ""
-                    if isinstance(block.input, dict):
-                        for key in ("file_path", "pattern", "command", "path"):
-                            if key in block.input:
-                                args_preview = f" {block.input[key]}"
-                                break
-                    print(f"\n[→ {block.name}{args_preview}]", flush=True)
+            buffered += _print_assistant_blocks(message)
     return buffered
 
 
@@ -270,6 +289,7 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> tuple[
     transcript = ""
     tracker = TokenTracker()
     turn_counter = 0
+    session: PromptSession = PromptSession()
 
     async with ClaudeSDKClient(
         options=ClaudeAgentOptions(
@@ -287,7 +307,7 @@ async def run_plan_interactive(initial_task: str, config: AgentConfig) -> tuple[
         transcript += await _stream_turn(client, tracker, f"turn {turn_counter}") + "\n\n"
 
         while True:
-            user_input = await anyio.to_thread.run_sync(input, "\n\n> ")
+            user_input = await session.prompt_async("\n\n> ", multiline=False)
             text = user_input.strip()
             if text == "/quit":
                 print("[plan] Aborted.")
@@ -367,6 +387,7 @@ async def run_verify_interactive(
 
     tracker = TokenTracker()
     turn = 0
+    session: PromptSession = PromptSession()
 
     async with ClaudeSDKClient(
         options=ClaudeAgentOptions(
@@ -384,7 +405,7 @@ async def run_verify_interactive(
         await _stream_turn(client, tracker, f"turn {turn}")
 
         while True:
-            user_input = await anyio.to_thread.run_sync(input, "\n\n> ")
+            user_input = await session.prompt_async("\n\n> ", multiline=False)
             text = user_input.strip()
             if text == "/quit":
                 print("[verify] Exiting.")
