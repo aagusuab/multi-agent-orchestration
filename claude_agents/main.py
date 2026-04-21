@@ -128,8 +128,14 @@ async def async_main():
             "`plan --interactive`, or `verify`."
         )
 
+    project_dir = Path(args.project_dir).resolve()
+    if not project_dir.is_dir():
+        sys.exit(
+            f"Error: --project-dir {project_dir} does not exist or is not a directory."
+        )
+
     config = AgentConfig(
-        project_dir=args.project_dir,
+        project_dir=str(project_dir),
         github_repo=args.repo,
         model=args.model,
         max_turns=args.max_turns,
